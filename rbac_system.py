@@ -2,14 +2,16 @@ import sqlite3
 import json
 import hashlib
 import secrets
+import sys
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from enum import Enum
 from contextlib import contextmanager
+from pathlib import Path
 
 
 # Database configuration
-DB_PATH = "D:/incident_management/data/sqlite/incident_management.db"
+DB_PATH = "Cloud_Infrastructure.db"
 
 
 # ============================================================================
@@ -18,13 +20,11 @@ DB_PATH = "D:/incident_management/data/sqlite/incident_management.db"
 
 class UserRole(Enum):
     """User roles in the incident management system"""
-    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     SRE_LEAD = "sre_lead"
     SRE_ENGINEER = "sre_engineer"
     DEVELOPER = "developer"
     VIEWER = "viewer"
-    AUDITOR = "auditor"
 
 
 class Permission(Enum):
@@ -67,31 +67,19 @@ class Permission(Enum):
 
 # Role to permissions mapping
 ROLE_PERMISSIONS = {
-    UserRole.SUPER_ADMIN: [p for p in Permission],  # All permissions
-    
-    UserRole.ADMIN: [
-        Permission.VIEW_INCIDENTS, Permission.CREATE_INCIDENTS, 
-        Permission.UPDATE_INCIDENTS, Permission.DELETE_INCIDENTS, 
-        Permission.RESOLVE_INCIDENTS,
-        Permission.VIEW_ALERTS, Permission.ACKNOWLEDGE_ALERTS, 
-        Permission.RESOLVE_ALERTS, Permission.DELETE_ALERTS,
-        Permission.VIEW_KNOWLEDGE_BASE, Permission.CREATE_KNOWLEDGE_BASE,
-        Permission.UPDATE_KNOWLEDGE_BASE, Permission.DELETE_KNOWLEDGE_BASE,
-        Permission.VIEW_USERS, Permission.CREATE_USERS, 
-        Permission.UPDATE_USERS, Permission.ASSIGN_ROLES,
-        Permission.VIEW_ANALYTICS, Permission.EXPORT_DATA,
-        Permission.CONFIGURE_INTEGRATIONS,
-    ],
+    UserRole.ADMIN: [p for p in Permission],  # All permissions
     
     UserRole.SRE_LEAD: [
         Permission.VIEW_INCIDENTS, Permission.CREATE_INCIDENTS,
-        Permission.UPDATE_INCIDENTS, Permission.RESOLVE_INCIDENTS,
+        Permission.UPDATE_INCIDENTS, Permission.DELETE_INCIDENTS,
+        Permission.RESOLVE_INCIDENTS,
         Permission.VIEW_ALERTS, Permission.ACKNOWLEDGE_ALERTS,
-        Permission.RESOLVE_ALERTS,
+        Permission.RESOLVE_ALERTS, Permission.DELETE_ALERTS,
         Permission.VIEW_KNOWLEDGE_BASE, Permission.CREATE_KNOWLEDGE_BASE,
-        Permission.UPDATE_KNOWLEDGE_BASE,
+        Permission.UPDATE_KNOWLEDGE_BASE, Permission.DELETE_KNOWLEDGE_BASE,
         Permission.VIEW_ANALYTICS, Permission.EXPORT_DATA,
-        Permission.VIEW_USERS,
+        Permission.VIEW_USERS, Permission.VIEW_AUDIT_LOGS,
+        Permission.CONFIGURE_INTEGRATIONS,
     ],
     
     UserRole.SRE_ENGINEER: [
@@ -100,7 +88,8 @@ ROLE_PERMISSIONS = {
         Permission.VIEW_ALERTS, Permission.ACKNOWLEDGE_ALERTS,
         Permission.RESOLVE_ALERTS,
         Permission.VIEW_KNOWLEDGE_BASE, Permission.CREATE_KNOWLEDGE_BASE,
-        Permission.VIEW_ANALYTICS,
+        Permission.UPDATE_KNOWLEDGE_BASE,
+        Permission.VIEW_ANALYTICS, Permission.EXPORT_DATA,
     ],
     
     UserRole.DEVELOPER: [
@@ -116,15 +105,6 @@ ROLE_PERMISSIONS = {
         Permission.VIEW_ALERTS,
         Permission.VIEW_KNOWLEDGE_BASE,
         Permission.VIEW_ANALYTICS,
-    ],
-    
-    UserRole.AUDITOR: [
-        Permission.VIEW_INCIDENTS,
-        Permission.VIEW_ALERTS,
-        Permission.VIEW_KNOWLEDGE_BASE,
-        Permission.VIEW_ANALYTICS,
-        Permission.EXPORT_DATA,
-        Permission.VIEW_AUDIT_LOGS,
     ],
 }
 
@@ -146,6 +126,10 @@ class DatabaseManager:
     @contextmanager
     def get_connection(self):
         """Context manager for database connections"""
+        # Ensure directory exists
+        db_dir = Path(DB_PATH).parent
+        db_dir.mkdir(parents=True, exist_ok=True)
+        
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         try:
@@ -177,6 +161,19 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(query, params)
             return cursor.lastrowid
+    
+    def table_exists(self, table_name: str) -> bool:
+        """Check if a table exists in the database"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,)
+                )
+                return cursor.fetchone() is not None
+        except:
+            return False
 
 
 # ============================================================================
@@ -195,41 +192,73 @@ class BaseModel:
     @classmethod
     def find_by_id(cls, record_id: str):
         """Find record by ID"""
-        query = f"SELECT * FROM {cls.table_name} WHERE id = ? OR {cls.table_name.rstrip('s')}_id = ?"
-        results = cls.db.execute_query(query, (record_id, record_id))
-        if results:
-            return cls(**dict(results[0]))
-        return None
+        try:
+            # Ensure table exists
+            if not cls.db.table_exists(cls.table_name):
+                return None
+                
+            query = f"SELECT * FROM {cls.table_name} WHERE id = ? OR {cls.table_name.rstrip('s')}_id = ?"
+            results = cls.db.execute_query(query, (record_id, record_id))
+            if results:
+                return cls(**dict(results[0]))
+            return None
+        except Exception as e:
+            print(f"Error in find_by_id: {e}")
+            return None
     
     @classmethod
     def find_all(cls, limit: int = 100, offset: int = 0):
         """Find all records with pagination"""
-        query = f"SELECT * FROM {cls.table_name} LIMIT ? OFFSET ?"
-        results = cls.db.execute_query(query, (limit, offset))
-        return [cls(**dict(row)) for row in results]
+        try:
+            # Ensure table exists
+            if not cls.db.table_exists(cls.table_name):
+                return []
+                
+            query = f"SELECT * FROM {cls.table_name} LIMIT ? OFFSET ?"
+            results = cls.db.execute_query(query, (limit, offset))
+            return [cls(**dict(row)) for row in results]
+        except Exception as e:
+            print(f"Error in find_all: {e}")
+            return []
     
     @classmethod
     def find_where(cls, conditions: Dict[str, Any], limit: int = 100):
         """Find records matching conditions"""
-        where_clause = " AND ".join([f"{k} = ?" for k in conditions.keys()])
-        query = f"SELECT * FROM {cls.table_name} WHERE {where_clause} LIMIT ?"
-        params = tuple(conditions.values()) + (limit,)
-        results = cls.db.execute_query(query, params)
-        return [cls(**dict(row)) for row in results]
+        try:
+            # Ensure table exists
+            if not cls.db.table_exists(cls.table_name):
+                return []
+                
+            where_clause = " AND ".join([f"{k} = ?" for k in conditions.keys()])
+            query = f"SELECT * FROM {cls.table_name} WHERE {where_clause} LIMIT ?"
+            params = tuple(conditions.values()) + (limit,)
+            results = cls.db.execute_query(query, params)
+            return [cls(**dict(row)) for row in results]
+        except Exception as e:
+            print(f"Error in find_where: {e}")
+            return []
     
     @classmethod
     def count(cls, conditions: Dict[str, Any] = None):
         """Count records"""
-        if conditions:
-            where_clause = " AND ".join([f"{k} = ?" for k in conditions.keys()])
-            query = f"SELECT COUNT(*) as count FROM {cls.table_name} WHERE {where_clause}"
-            params = tuple(conditions.values())
-        else:
-            query = f"SELECT COUNT(*) as count FROM {cls.table_name}"
-            params = ()
-        
-        result = cls.db.execute_query(query, params)
-        return result[0]['count'] if result else 0
+        try:
+            # Ensure table exists
+            if not cls.db.table_exists(cls.table_name):
+                return 0
+                
+            if conditions:
+                where_clause = " AND ".join([f"{k} = ?" for k in conditions.keys()])
+                query = f"SELECT COUNT(*) as count FROM {cls.table_name} WHERE {where_clause}"
+                params = tuple(conditions.values())
+            else:
+                query = f"SELECT COUNT(*) as count FROM {cls.table_name}"
+                params = ()
+            
+            result = cls.db.execute_query(query, params)
+            return result[0]['count'] if result else 0
+        except Exception as e:
+            print(f"Error in count: {e}")
+            return 0
     
     def to_dict(self):
         """Convert model to dictionary"""
@@ -254,7 +283,7 @@ class User(BaseModel):
         self.role = role if isinstance(role, str) else role.value if role else None
         self.full_name = full_name
         self.department = department
-        self.is_active = is_active
+        self.is_active = is_active if isinstance(is_active, bool) else bool(is_active)
         self.created_at = created_at
         self.updated_at = updated_at
         self.last_login = last_login
@@ -280,6 +309,12 @@ class User(BaseModel):
                full_name: str, department: str = None) -> 'User':
         """Create new user"""
         import uuid
+        
+        # Ensure table exists before inserting
+        if not cls.db.table_exists(cls.table_name):
+            print(f"⚠️  Warning: {cls.table_name} table does not exist. Creating tables first...")
+            create_rbac_tables()
+        
         user_id = str(uuid.uuid4())
         password_hash = cls.hash_password(password)
         timestamp = datetime.utcnow().isoformat() + "Z"
@@ -296,42 +331,58 @@ class User(BaseModel):
         ))
         
         # Log the action
-        AuditLog.create(
-            user_id=user_id,
-            action="USER_CREATED",
-            resource_type="User",
-            resource_id=user_id,
-            details=f"User {username} created with role {role.value}"
-        )
+        try:
+            AuditLog.create(
+                user_id=user_id,
+                action="USER_CREATED",
+                resource_type="User",
+                resource_id=user_id,
+                details=f"User {username} created with role {role.value}"
+            )
+        except:
+            pass  # Don't fail user creation if audit log fails
         
         return cls.find_by_id(user_id)
     
     @classmethod
     def authenticate(cls, username: str, password: str) -> Optional['User']:
         """Authenticate user by username and password"""
-        results = cls.db.execute_query(
-            "SELECT * FROM users WHERE username = ? AND is_active = 1",
-            (username,)
-        )
-        
-        if not results:
-            return None
-        
-        user = cls(**dict(results[0]))
-        if cls.verify_password(password, user.password_hash):
-            # Update last login
-            cls.db.execute_update(
-                "UPDATE users SET last_login = ? WHERE user_id = ?",
-                (datetime.utcnow().isoformat() + "Z", user.user_id)
+        try:
+            # Ensure table exists
+            if not cls.db.table_exists(cls.table_name):
+                print(f"⚠️  Warning: {cls.table_name} table does not exist.")
+                return None
+                
+            results = cls.db.execute_query(
+                "SELECT * FROM users WHERE username = ? AND is_active = 1",
+                (username,)
             )
-            return user
-        
-        return None
+            
+            if not results:
+                return None
+            
+            user = cls(**dict(results[0]))
+            if cls.verify_password(password, user.password_hash):
+                # Update last login
+                cls.db.execute_update(
+                    "UPDATE users SET last_login = ? WHERE user_id = ?",
+                    (datetime.utcnow().isoformat() + "Z", user.user_id)
+                )
+                return user
+            
+            return None
+        except Exception as e:
+            print(f"Authentication error: {e}")
+            return None
     
     def has_permission(self, permission: Permission) -> bool:
         """Check if user has specific permission"""
-        user_role = UserRole(self.role)
-        return permission in ROLE_PERMISSIONS.get(user_role, [])
+        try:
+            user_role = UserRole(self.role)
+            return permission in ROLE_PERMISSIONS.get(user_role, [])
+        except Exception as e:
+            print(f"Permission check error: {e}")
+            return False
     
     def has_any_permission(self, permissions: List[Permission]) -> bool:
         """Check if user has any of the specified permissions"""
@@ -343,8 +394,11 @@ class User(BaseModel):
     
     def get_permissions(self) -> List[Permission]:
         """Get all permissions for user's role"""
-        user_role = UserRole(self.role)
-        return ROLE_PERMISSIONS.get(user_role, [])
+        try:
+            user_role = UserRole(self.role)
+            return ROLE_PERMISSIONS.get(user_role, [])
+        except:
+            return []
     
     def update_role(self, new_role: UserRole, updated_by: str):
         """Update user role"""
@@ -355,13 +409,16 @@ class User(BaseModel):
         self.db.execute_update(query, (new_role.value, timestamp, self.user_id))
         
         # Log the action
-        AuditLog.create(
-            user_id=updated_by,
-            action="ROLE_UPDATED",
-            resource_type="User",
-            resource_id=self.user_id,
-            details=f"Role changed from {old_role} to {new_role.value}"
-        )
+        try:
+            AuditLog.create(
+                user_id=updated_by,
+                action="ROLE_UPDATED",
+                resource_type="User",
+                resource_id=self.user_id,
+                details=f"Role changed from {old_role} to {new_role.value}"
+            )
+        except:
+            pass
         
         self.role = new_role.value
         self.updated_at = timestamp
@@ -373,13 +430,16 @@ class User(BaseModel):
         
         self.db.execute_update(query, (timestamp, self.user_id))
         
-        AuditLog.create(
-            user_id=deactivated_by,
-            action="USER_DEACTIVATED",
-            resource_type="User",
-            resource_id=self.user_id,
-            details=f"User {self.username} deactivated"
-        )
+        try:
+            AuditLog.create(
+                user_id=deactivated_by,
+                action="USER_DEACTIVATED",
+                resource_type="User",
+                resource_id=self.user_id,
+                details=f"User {self.username} deactivated"
+            )
+        except:
+            pass
         
         self.is_active = False
 
@@ -417,13 +477,16 @@ class Incident(BaseModel):
             "new"
         ))
         
-        AuditLog.create(
-            user_id=user_id,
-            action="INCIDENT_CREATED",
-            resource_type="Incident",
-            resource_id=incident_id,
-            details=f"Incident created from {source_type}"
-        )
+        try:
+            AuditLog.create(
+                user_id=user_id,
+                action="INCIDENT_CREATED",
+                resource_type="Incident",
+                resource_id=incident_id,
+                details=f"Incident created from {source_type}"
+            )
+        except:
+            pass
         
         return cls.find_by_id(incident_id)
     
@@ -439,19 +502,25 @@ class Incident(BaseModel):
         
         self.db.execute_update(query, (new_status, self.id))
         
-        AuditLog.create(
-            user_id=user_id,
-            action="INCIDENT_STATUS_UPDATED",
-            resource_type="Incident",
-            resource_id=self.id,
-            details=f"Status changed from {old_status} to {new_status}"
-        )
+        try:
+            AuditLog.create(
+                user_id=user_id,
+                action="INCIDENT_STATUS_UPDATED",
+                resource_type="Incident",
+                resource_id=self.id,
+                details=f"Status changed from {old_status} to {new_status}"
+            )
+        except:
+            pass
         
         self.status = new_status
     
     def get_data(self) -> Dict:
         """Get incident data as dictionary"""
-        return json.loads(self.incident_json) if self.incident_json else {}
+        try:
+            return json.loads(self.incident_json) if self.incident_json else {}
+        except:
+            return {}
 
 
 # ============================================================================
@@ -489,9 +558,15 @@ class Alert(BaseModel):
     @classmethod
     def find_active_alerts(cls, limit: int = 100):
         """Find all active (fired) alerts"""
-        query = f"SELECT * FROM {cls.table_name} WHERE alert_status = 'Fired' LIMIT ?"
-        results = cls.db.execute_query(query, (limit,))
-        return [cls(**dict(row)) for row in results]
+        try:
+            if not cls.db.table_exists(cls.table_name):
+                return []
+                
+            query = f"SELECT * FROM {cls.table_name} WHERE alert_status = 'Fired' LIMIT ?"
+            results = cls.db.execute_query(query, (limit,))
+            return [cls(**dict(row)) for row in results]
+        except:
+            return []
     
     @classmethod
     def find_by_environment(cls, environment: str, limit: int = 100):
@@ -503,13 +578,16 @@ class Alert(BaseModel):
         query = "UPDATE azure_alerts SET alert_status = 'Acknowledged' WHERE alert_id = ?"
         self.db.execute_update(query, (self.alert_id,))
         
-        AuditLog.create(
-            user_id=user_id,
-            action="ALERT_ACKNOWLEDGED",
-            resource_type="Alert",
-            resource_id=self.alert_id,
-            details=f"Alert {self.alert_name} acknowledged"
-        )
+        try:
+            AuditLog.create(
+                user_id=user_id,
+                action="ALERT_ACKNOWLEDGED",
+                resource_type="Alert",
+                resource_id=self.alert_id,
+                details=f"Alert {self.alert_name} acknowledged"
+            )
+        except:
+            pass
         
         self.alert_status = "Acknowledged"
     
@@ -523,13 +601,16 @@ class Alert(BaseModel):
         """
         self.db.execute_update(query, (resolved_time, self.alert_id))
         
-        AuditLog.create(
-            user_id=user_id,
-            action="ALERT_RESOLVED",
-            resource_type="Alert",
-            resource_id=self.alert_id,
-            details=f"Alert {self.alert_name} resolved"
-        )
+        try:
+            AuditLog.create(
+                user_id=user_id,
+                action="ALERT_RESOLVED",
+                resource_type="Alert",
+                resource_id=self.alert_id,
+                details=f"Alert {self.alert_name} resolved"
+            )
+        except:
+            pass
         
         self.alert_status = "Resolved"
         self.resolved_time = resolved_time
@@ -573,14 +654,20 @@ class KnowledgeBase(BaseModel):
     @classmethod
     def search_by_cause(cls, search_term: str, limit: int = 10):
         """Search knowledge base by cause"""
-        query = f"""
-            SELECT * FROM {cls.table_name} 
-            WHERE cause LIKE ? OR description LIKE ?
-            LIMIT ?
-        """
-        search_pattern = f"%{search_term}%"
-        results = cls.db.execute_query(query, (search_pattern, search_pattern, limit))
-        return [cls(**dict(row)) for row in results]
+        try:
+            if not cls.db.table_exists(cls.table_name):
+                return []
+                
+            query = f"""
+                SELECT * FROM {cls.table_name} 
+                WHERE cause LIKE ? OR description LIKE ?
+                LIMIT ?
+            """
+            search_pattern = f"%{search_term}%"
+            results = cls.db.execute_query(query, (search_pattern, search_pattern, limit))
+            return [cls(**dict(row)) for row in results]
+        except:
+            return []
     
     @classmethod
     def find_by_cloud_provider(cls, cloud_provider: str, limit: int = 100):
@@ -630,6 +717,11 @@ class AuditLog(BaseModel):
                user_agent: str = None):
         """Create audit log entry"""
         import uuid
+        
+        # Ensure table exists before inserting
+        if not cls.db.table_exists(cls.table_name):
+            create_rbac_tables()
+        
         log_id = str(uuid.uuid4())
         timestamp = datetime.utcnow().isoformat() + "Z"
         
@@ -652,14 +744,20 @@ class AuditLog(BaseModel):
     @classmethod
     def find_by_resource(cls, resource_type: str, resource_id: str, limit: int = 100):
         """Find audit logs for specific resource"""
-        query = f"""
-            SELECT * FROM {cls.table_name} 
-            WHERE resource_type = ? AND resource_id = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-        """
-        results = cls.db.execute_query(query, (resource_type, resource_id, limit))
-        return [cls(**dict(row)) for row in results]
+        try:
+            if not cls.db.table_exists(cls.table_name):
+                return []
+                
+            query = f"""
+                SELECT * FROM {cls.table_name} 
+                WHERE resource_type = ? AND resource_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            results = cls.db.execute_query(query, (resource_type, resource_id, limit))
+            return [cls(**dict(row)) for row in results]
+        except:
+            return []
 
 
 # ============================================================================
@@ -686,14 +784,27 @@ def require_permission(*permissions: Permission):
 # DATABASE SCHEMA CREATION
 # ============================================================================
 
-def create_rbac_tables():
-    """Create all RBAC-related tables"""
+def create_rbac_tables(recreate=False):
+    """Create all RBAC-related tables
+    
+    Args:
+        recreate (bool): If True, drop existing tables and recreate them
+    """
     db = DatabaseManager()
+    
+    print("\n🔧 Setting up RBAC tables...")
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
         
+        if recreate:
+            print("🗑️  Dropping existing RBAC tables...")
+            cursor.execute("DROP TABLE IF EXISTS audit_logs")
+            cursor.execute("DROP TABLE IF EXISTS users")
+            print("✓ Existing RBAC tables dropped")
+        
         # Users table
+        print("📝 Creating users table...")
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id TEXT PRIMARY KEY,
@@ -711,6 +822,7 @@ def create_rbac_tables():
         """)
         
         # Audit logs table
+        print("📝 Creating audit_logs table...")
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS audit_logs (
             log_id TEXT PRIMARY KEY,
@@ -727,6 +839,7 @@ def create_rbac_tables():
         """)
         
         # Create indexes
+        print("📝 Creating indexes...")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
@@ -737,18 +850,35 @@ def create_rbac_tables():
         print("✓ RBAC tables created successfully")
 
 
-def seed_default_users():
-    """Create default users for testing"""
+def seed_default_users(force=False):
+    """Create default users for testing
+    
+    Args:
+        force (bool): If True, delete existing users before seeding
+    """
+    db = DatabaseManager()
+    
+    # Ensure tables exist first
+    if not db.table_exists("users"):
+        print("⚠️  Users table does not exist. Creating RBAC tables first...")
+        create_rbac_tables()
+    
     try:
-        # Super Admin
-        User.create(
-            username="super_admin",
-            email="super_admin@company.com",
-            password="Admin@123",
-            role=UserRole.SUPER_ADMIN,
-            full_name="Super Administrator",
-            department="IT Operations"
-        )
+        if force:
+            print("🗑️  Clearing existing users...")
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM users")
+            print("✓ Existing users cleared")
+        else:
+            # Check if users already exist
+            existing_users = User.find_all(limit=1)
+            if existing_users:
+                print("⚠️  Users already exist. Use --force to recreate.")
+                print(f"   Found {User.count()} existing users.")
+                return
+        
+        print("\n📝 Creating default users...")
         
         # Admin
         User.create(
@@ -800,33 +930,22 @@ def seed_default_users():
             department="Business"
         )
         
-        # Auditor
-        User.create(
-            username="auditor",
-            email="auditor@company.com",
-            password="Audit@123",
-            role=UserRole.AUDITOR,
-            full_name="Compliance Auditor",
-            department="Compliance"
-        )
-        
         print("✓ Default users created successfully")
-        print("
-📝 Default User Credentials:")
+        print("\n📝 Default User Credentials:")
         print("=" * 60)
         print("Username         | Password   | Role")
         print("-" * 60)
-        print("super_admin      | Admin@123  | Super Administrator")
-        print("admin            | Admin@123  | Administrator")
+        print("admin            | Admin@123  | Administrator (Full Access)")
         print("sre_lead         | Sre@123    | SRE Lead")
         print("sre_engineer     | Sre@123    | SRE Engineer")
         print("developer        | Dev@123    | Developer")
-        print("viewer           | View@123   | Viewer")
-        print("auditor          | Audit@123  | Auditor")
+        print("viewer           | View@123   | Viewer (Read-Only)")
         print("=" * 60)
         
     except Exception as e:
-        print(f"⚠️  Some users may already exist: {e}")
+        print(f"⚠️  Error seeding users: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # ============================================================================
@@ -836,25 +955,26 @@ def seed_default_users():
 def demo_rbac_usage():
     """Demonstrate RBAC system usage"""
     
-    print("
-" + "=" * 70)
-    print("🔐 RBAC SYSTEM DEMONSTRATION")
+    print("\n" + "=" * 70)
+    print("🔐 RBAC SYSTEM DEMONSTRATION (5 ROLES)")
     print("=" * 70)
     
     # 1. User Authentication
-    print("
-1️⃣  User Authentication:")
+    print("\n1️⃣  User Authentication:")
     print("-" * 70)
     user = User.authenticate("sre_engineer", "Sre@123")
     if user:
         print(f"✓ Authenticated: {user.full_name} ({user.role})")
+        print(f"  Email: {user.email}")
+        print(f"  Department: {user.department}")
         print(f"  Last Login: {user.last_login}")
     else:
-        print("✗ Authentication failed")
+        print("✗ Authentication failed - No users found in database")
+        print("⚠️  Please make sure you ran seed_default_users() first")
+        return  # Exit early
     
     # 2. Check Permissions
-    print("
-2️⃣  Permission Checks:")
+    print("\n2️⃣  Permission Checks:")
     print("-" * 70)
     permissions_to_check = [
         Permission.VIEW_INCIDENTS,
@@ -869,56 +989,69 @@ def demo_rbac_usage():
         print(f"{status} {perm.value}: {has_perm}")
     
     # 3. List all permissions for role
-    print(f"
-3️⃣  All Permissions for {user.role}:")
+    print(f"\n3️⃣  All Permissions for {user.role}:")
     print("-" * 70)
     all_perms = user.get_permissions()
+    print(f"Total permissions: {len(all_perms)}")
     for perm in all_perms:
         print(f"  • {perm.value}")
     
     # 4. Query Incidents (with permission check)
-    print("
-4️⃣  Query Incidents:")
+    print("\n4️⃣  Query Incidents:")
     print("-" * 70)
     if user.has_permission(Permission.VIEW_INCIDENTS):
         incidents = Incident.find_all(limit=5)
-        print(f"✓ Found {len(incidents)} incidents")
-        for inc in incidents[:3]:
-            print(f"  • {inc.id} - Status: {inc.status}")
+        print(f"✓ Permission granted - Found {len(incidents)} incidents")
+        if incidents:
+            for inc in incidents[:3]:
+                print(f"  • {inc.id} - Status: {inc.status}")
+        else:
+            print("  (No incidents in database)")
+    else:
+        print("✗ Permission denied")
     
     # 5. Query Alerts
-    print("
-5️⃣  Query Active Alerts:")
+    print("\n5️⃣  Query Active Alerts:")
     print("-" * 70)
     if user.has_permission(Permission.VIEW_ALERTS):
         alerts = Alert.find_active_alerts(limit=5)
-        print(f"✓ Found {len(alerts)} active alerts")
-        for alert in alerts[:3]:
-            print(f"  • {alert.alert_name} - {alert.severity} - {alert.environment}")
+        print(f"✓ Permission granted - Found {len(alerts)} active alerts")
+        if alerts:
+            for alert in alerts[:3]:
+                print(f"  • {alert.alert_name} - {alert.severity} - {alert.environment}")
+        else:
+            print("  (No active alerts in database)")
+    else:
+        print("✗ Permission denied")
     
     # 6. Search Knowledge Base
-    print("
-6️⃣  Search Knowledge Base:")
+    print("\n6️⃣  Search Knowledge Base:")
     print("-" * 70)
     if user.has_permission(Permission.VIEW_KNOWLEDGE_BASE):
         kb_results = KnowledgeBase.search_by_cause("database", limit=3)
-        print(f"✓ Found {len(kb_results)} knowledge base entries")
-        for kb in kb_results:
-            print(f"  • {kb.cloud_provider} - {kb.severity}: {kb.cause[:60]}...")
+        print(f"✓ Permission granted - Found {len(kb_results)} knowledge base entries")
+        if kb_results:
+            for kb in kb_results:
+                print(f"  • {kb.cloud_provider} - {kb.severity}: {kb.cause[:60]}...")
+        else:
+            print("  (No knowledge base entries matching 'database')")
+    else:
+        print("✗ Permission denied")
     
     # 7. View Audit Logs (if permitted)
-    print("
-7️⃣  Audit Log Activity:")
+    print("\n7️⃣  Audit Log Activity:")
     print("-" * 70)
     if user.has_permission(Permission.VIEW_AUDIT_LOGS):
         logs = AuditLog.find_by_user(user.user_id, limit=5)
-        print(f"✓ Found {len(logs)} audit log entries")
+        print(f"✓ Permission granted - Found {len(logs)} audit log entries")
+        if logs:
+            for log in logs[:3]:
+                print(f"  • {log.action} on {log.resource_type} at {log.created_at}")
     else:
-        print("✗ No permission to view audit logs")
+        print("✗ No permission to view audit logs (SRE Engineers cannot view audit logs)")
     
     # 8. Try restricted operation
-    print("
-8️⃣  Attempting Restricted Operation:")
+    print("\n8️⃣  Attempting Restricted Operation (Delete User):")
     print("-" * 70)
     try:
         @require_permission(Permission.DELETE_USERS)
@@ -930,8 +1063,27 @@ def demo_rbac_usage():
     except PermissionError as e:
         print(f"✗ Permission Denied: {e}")
     
-    print("
-" + "=" * 70)
+    # 9. Show role hierarchy
+    print("\n9️⃣  Role Hierarchy & Permission Summary:")
+    print("-" * 70)
+    for role in UserRole:
+        perms = ROLE_PERMISSIONS.get(role, [])
+        print(f"\n{role.value.upper()}: {len(perms)} permissions")
+        print(f"  Key capabilities: ", end="")
+        if role == UserRole.ADMIN:
+            print("Full system access - all operations")
+        elif role == UserRole.SRE_LEAD:
+            print("Incident management, knowledge base, user viewing, audits")
+        elif role == UserRole.SRE_ENGINEER:
+            print("Incident resolution, alert management, knowledge updates")
+        elif role == UserRole.DEVELOPER:
+            print("View and create incidents, acknowledge alerts, view KB")
+        elif role == UserRole.VIEWER:
+            print("Read-only access to incidents, alerts, knowledge base, analytics")
+    
+    print("\n" + "=" * 70)
+    print("✅ RBAC Demonstration Complete!")
+    print("=" * 70)
 
 
 # ============================================================================
@@ -939,11 +1091,36 @@ def demo_rbac_usage():
 # ============================================================================
 
 if __name__ == "__main__":
-    # Create tables
-    create_rbac_tables()
+    print("=" * 70)
+    print("🚀 RBAC System Setup - Cloud Incident Management")
+    print("=" * 70)
+    
+    # Check for command line arguments
+    recreate = "--recreate" in sys.argv or "-r" in sys.argv
+    force = "--force" in sys.argv or "-f" in sys.argv
+    
+    if recreate:
+        print("\n⚠️  RECREATE MODE: Tables will be dropped and recreated")
+        print("⚠️  All existing data will be lost!")
+        confirm = input("\nContinue? (yes/no): ")
+        if confirm.lower() != "yes":
+            print("❌ Operation cancelled")
+            sys.exit(0)
+    
+    # Create tables first (always)
+    create_rbac_tables(recreate=recreate)
     
     # Seed default users
-    seed_default_users()
+    seed_default_users(force=force or recreate)
     
     # Run demonstration
     demo_rbac_usage()
+    
+    print("\n" + "=" * 70)
+    print("💡 Usage Examples:")
+    print("=" * 70)
+    print("  python rbac_system.py              # Normal mode")
+    print("  python rbac_system.py --recreate   # Drop and recreate tables")
+    print("  python rbac_system.py --force      # Reseed users")
+    print("  python rbac_system.py -r -f        # Both modes")
+    print("=" * 70)
