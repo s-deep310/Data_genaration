@@ -14,7 +14,7 @@ DB_PATH = r"C:\Users\GENAIKOLGPUSR15\Desktop\Incident_management\incident_db\dat
 llm = ChatOpenAI(
     base_url="https://genailab.tcs.in",
     model="azure_ai/genailab-maas-DeepSeek-V3-0324",
-    api_key="sk-vnedOvmLAuyelJh-X1G-tA",  # Provided for hackathon use only, do not misuse
+    api_key="",  # Provided for hackathon use only, do not misuse
     http_client=client
 )
 
